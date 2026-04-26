@@ -28,11 +28,16 @@ jobs:
       - name: Install dependencies
         run: pip install pyyaml
 
-      - name: Confirm job files exist
+      - name: Confirm job and database files exist
         run: |
           if [ ! -d "jobs" ]; then
-            echo "No jobs directory found — skipping SQL validation."
-            exit 0
+            echo "ERROR: No jobs directory found."
+            exit 1
+          fi
+
+          if [ ! -f "db/dev_payments.db" ]; then
+            echo "ERROR: db/dev_payments.db not found."
+            exit 1
           fi
 
           echo "=== job.yaml files ==="
@@ -54,9 +59,12 @@ jobs:
       - name: Validate job.yaml structure
         run: |
           python3 << 'EOF'
-          import yaml, pathlib, sys
+          import yaml
+          import pathlib
+          import sys
 
-          REQUIRED_FIELDS = {"name", "type", "connector", "schedule"}
+          REQUIRED_FIELDS = {"name", "type", "connector", "schedule", "sql_file"}
+
           errors = []
 
           for spec_file in pathlib.Path("jobs").rglob("job.yaml"):
@@ -72,9 +80,19 @@ jobs:
 
               missing = REQUIRED_FIELDS - doc.keys()
               if missing:
-                  errors.append(f"FAIL {spec_file}: missing required fields: {missing}")
-              else:
-                  print(f"OK   {spec_file}")
+                  errors.append(f"FAIL {spec_file}: missing required fields: {sorted(missing)}")
+                  continue
+
+              if doc.get("type") not in {"sql", "scheduled_sql"}:
+                  errors.append(f"FAIL {spec_file}: type must be 'sql' or 'scheduled_sql'")
+
+              if doc.get("connector") != "sqlite":
+                  errors.append(f"FAIL {spec_file}: connector must be 'sqlite' for current demo")
+
+              if doc.get("sql_file") != "query.sql":
+                  errors.append(f"FAIL {spec_file}: sql_file must be 'query.sql'")
+
+              print(f"OK   {spec_file}")
 
           if errors:
               for err in errors:
@@ -82,21 +100,29 @@ jobs:
               sys.exit(1)
           EOF
 
-      - name: Validate SQL syntax against schema
+      - name: Validate SQL syntax against dev_payments.db
         run: |
           python3 << 'EOF'
-          import sqlite3, pathlib, sys
+          import sqlite3
+          import pathlib
+          import sys
 
-          DB_PATH = "db/schema.db"  # your committed .db file
+          DB_PATH = pathlib.Path("db/dev_payments.db")
           errors = []
+
+          if not DB_PATH.exists():
+              print(f"FAIL: database file {DB_PATH} does not exist")
+              sys.exit(1)
 
           for sql_file in pathlib.Path("jobs").rglob("query.sql"):
               query = sql_file.read_text().strip()
+
               if not query:
                   errors.append(f"FAIL {sql_file}: query.sql is empty")
                   continue
+
               try:
-                  conn = sqlite3.connect(DB_PATH)
+                  conn = sqlite3.connect(str(DB_PATH))
                   conn.execute(f"EXPLAIN {query}")
                   conn.close()
                   print(f"OK   {sql_file}")
@@ -113,16 +139,20 @@ jobs:
         if: startsWith(github.base_ref, 'release/')
         run: |
           python3 << 'EOF'
-          import yaml, pathlib, sys
+          import yaml
+          import pathlib
+          import sys
 
           errors = []
 
           for spec_file in pathlib.Path("jobs").rglob("job.yaml"):
               doc = yaml.safe_load(spec_file.read_text()) or {}
+
               if not doc.get("owner"):
-                  errors.append(f"FAIL {spec_file}: 'owner' is required for release branch PRs")
+                  errors.append(f"FAIL {spec_file}: owner is required for release branch PRs")
+
               if doc.get("environment") != "prod":
-                  errors.append(f"FAIL {spec_file}: 'environment' must be 'prod' for release branch PRs")
+                  errors.append(f"FAIL {spec_file}: environment must be 'prod' for release branch PRs")
 
           if errors:
               for err in errors:
