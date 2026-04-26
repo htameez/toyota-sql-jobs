@@ -5,49 +5,129 @@ on:
     branches:
       - dev
       - main
-      - prod
+      - "release/*"
     paths:
       - "jobs/**"
       - "db/**"
-      - "scripts/**"
       - ".github/workflows/validate-sql-jobs.yml"
 
 jobs:
-  validate-sql-job:
-    name: Validate SQL Job
+  validate-sql-jobs:
+    name: Validate SQL Jobs
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
       - name: Confirm job files exist
         run: |
-          echo "Checking SQL job files..."
-
           if [ ! -d "jobs" ]; then
-            echo "Missing jobs directory"
-            exit 1
+            echo "No jobs directory found — skipping SQL validation."
+            exit 0
           fi
 
+          echo "=== job.yaml files ==="
           find jobs -name "job.yaml" -print
+
+          echo "=== query.sql files ==="
           find jobs -name "query.sql" -print
 
           if [ -z "$(find jobs -name 'job.yaml')" ]; then
-            echo "No job.yaml file found"
+            echo "ERROR: No job.yaml files found under jobs/"
             exit 1
           fi
 
           if [ -z "$(find jobs -name 'query.sql')" ]; then
-            echo "No query.sql file found"
+            echo "ERROR: No query.sql files found under jobs/"
             exit 1
           fi
 
-      - name: Validate SQL job structure
+      - name: Validate job.yaml structure
         run: |
-          echo "SQL job structure looks valid."
+          python3 << 'EOF'
+          import yaml, pathlib, sys
 
-      - name: Validate SQLite query placeholder
+          REQUIRED_FIELDS = {"name", "type", "connector", "schedule"}
+          errors = []
+
+          for spec_file in pathlib.Path("jobs").rglob("job.yaml"):
+              try:
+                  doc = yaml.safe_load(spec_file.read_text())
+              except yaml.YAMLError as e:
+                  errors.append(f"FAIL {spec_file}: invalid YAML — {e}")
+                  continue
+
+              if not isinstance(doc, dict):
+                  errors.append(f"FAIL {spec_file}: expected a YAML mapping at the top level")
+                  continue
+
+              missing = REQUIRED_FIELDS - doc.keys()
+              if missing:
+                  errors.append(f"FAIL {spec_file}: missing required fields: {missing}")
+              else:
+                  print(f"OK   {spec_file}")
+
+          if errors:
+              for err in errors:
+                  print(err)
+              sys.exit(1)
+          EOF
+
+      - name: Validate SQL syntax against schema
         run: |
-          echo "In the full demo, this step calls the custom FastMCP SQL MCP server."
-          echo "For now, this confirms the GitHub Actions check works."
+          python3 << 'EOF'
+          import sqlite3, pathlib, sys
+
+          DB_PATH = "db/schema.db"  # your committed .db file
+          errors = []
+
+          for sql_file in pathlib.Path("jobs").rglob("query.sql"):
+              query = sql_file.read_text().strip()
+              if not query:
+                  errors.append(f"FAIL {sql_file}: query.sql is empty")
+                  continue
+              try:
+                  conn = sqlite3.connect(DB_PATH)
+                  conn.execute(f"EXPLAIN {query}")
+                  conn.close()
+                  print(f"OK   {sql_file}")
+              except sqlite3.Error as e:
+                  errors.append(f"FAIL {sql_file}: {e}")
+
+          if errors:
+              for err in errors:
+                  print(err)
+              sys.exit(1)
+          EOF
+
+      - name: Stricter checks for release branches
+        if: startsWith(github.base_ref, 'release/')
+        run: |
+          python3 << 'EOF'
+          import yaml, pathlib, sys
+
+          errors = []
+
+          for spec_file in pathlib.Path("jobs").rglob("job.yaml"):
+              doc = yaml.safe_load(spec_file.read_text()) or {}
+              if not doc.get("owner"):
+                  errors.append(f"FAIL {spec_file}: 'owner' is required for release branch PRs")
+              if doc.get("environment") != "prod":
+                  errors.append(f"FAIL {spec_file}: 'environment' must be 'prod' for release branch PRs")
+
+          if errors:
+              for err in errors:
+                  print(err)
+              sys.exit(1)
+
+          print("Release branch checks passed.")
+          EOF
