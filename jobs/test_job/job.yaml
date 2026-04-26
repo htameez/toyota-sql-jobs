@@ -1,0 +1,7 @@
+name: test_job
+type: scheduled_sql
+connector: sqlite
+schedule: "0 7 * * 1-5"
+sql_file: query.sql
+owner: test
+environment: dev
